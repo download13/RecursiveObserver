@@ -11,18 +11,18 @@
 
 		this._handler = this._handler.bind(this);
 		this._addChild = this._addChild.bind(this);
-		this._removeChild = this._removeChild.bind(this);
 	}
-	Observer.prototype.getPath = function(includeThis) {
+	Observer.prototype.getPath = function() {
 		var path;
-		if(this.parent) path = this.parent.getPath(true);
+		if(this.parent) path = this.parent.getPath();
 		else path = [];
-		if(includeThis && this.name != null) path.push(this.name);
+		if(this.name != null) path.push(this.name);
 		return path;
 	}
 
 
 	function ObjectObserver(opts) {
+		// Call super
 		Observer.call(this, opts);
 		var o = this.o;
 		if(!(o instanceof Object)) throw new Error('Object required');
@@ -30,6 +30,7 @@
 		this._children = {};
 		Object.observe(o, this._handler);
 
+		// Ensure we fire events for anything already on this object
 		var notifier = Object.getNotifier(o);
 		Object.keys(o).forEach(function(key) {
 			notifier.notify({
@@ -41,42 +42,43 @@
 		});
 	}
 	ObjectObserver.prototype = Object.create(Observer.prototype);
-	ObjectObserver.prototype._handler = function(changes) {
-		var context = '';
-		if(this.name) {
-			context = this.getPath(true).join('.');
-		}
+	ObjectObserver.prototype._handler = function(changes, fake) {
 		changes = minimizeObjChanges(changes.map(translateToUpdate));
-		changes.forEach(this._change.bind(this, context));
+		var context = this.getPath().join('.');
+		changes.forEach(function(change) {
+			change.path = combine(context, change.name);
+		}, this);
+
+		if(!fake) {
+			changes.forEach(this._handleUpdate, this);
+		}
 		this.cb(changes);
 	}
-	ObjectObserver.prototype._change = function(context, change) {
-		var name = change.name;
-		change.path = combine(context, name);
-		this._removeChild(name);
-		this._addChild(name, change.newValue);
-		return change;
+	ObjectObserver.prototype._handleUpdate = function(change) {
+		this._removeChild(change.name, true);
+		this._addChild(change.name, change.newValue);
 	}
 	ObjectObserver.prototype._addChild = function(name, o) {
 		if(!(o instanceof Object)) return;
-		var obs;
-		if(Array.isArray(o)) {
-			obs = new ArrayObserver({watch: o, cb: this.cb, parent: this, name: name});
-		} else {
-			obs = new ObjectObserver({watch: o, cb: this.cb, parent: this, name: name});
+		var ch = this._children;
+		var obs = ch[name];
+		if(obs == null) {
+			var obs = createObserver({watch: o, cb: this.cb, parent: this, name: name});
+			ch[name] = obs;
 		}
-		this._children[name] = obs;
 	}
-	ObjectObserver.prototype._removeChild = function(name) {
+	ObjectObserver.prototype._removeChild = function(name, notify) {
 		var obs = this._children[name];
 		if(obs) {
-			obs.destroy(true);
+			obs.destroy(notify);
 			delete this._children[name];
 		}
 	}
 	ObjectObserver.prototype.destroy = function(notify) { // TODO: Option to send out notifications or not
 		// Destroy all child properties
-		Object.keys(this._children).forEach(this._removeChild);
+		Object.keys(this._children).forEach(function(name) {
+			this._removeChild(name, notify);
+		}, this);
 
 		// Send notifications about all properties going away
 		var o = this.o;
@@ -90,7 +92,7 @@
 					newValue: undefined
 				};
 			});
-			this.cb(changes);
+			this._handler(changes, true);
 		}
 
 		Object.unobserve(o, this._handler);
@@ -118,22 +120,23 @@
 	}
 	ArrayObserver.prototype = Object.create(Observer.prototype);
 	ArrayObserver.prototype._handler = function(changes) {
-		var context = '';
-		if(this.name) {
-			context = this.getPath(true).join('.');
-		}
 		changes = changes.map(translateToUpdate);
-		changes.forEach(this._change.bind(this, context));
+
+		var context = this.getPath().join('.');
+		changes.forEach(function(change) {
+			change.path = context;
+		});
+
+		changes.forEach(this._handleSplice, this);
 		this.o.forEach(this._addChild); // Try to add all items, only new ones succeed
 		this.cb(changes);
 	}
-	ArrayObserver.prototype._change = function(context, change) {
-		change.path = context;
+	ArrayObserver.prototype._handleSplice = function(change) {
 		var n = change.index;
 		var ch = this._children;
 
 		change.removed.forEach(function(item) {
-			this._removeChild(item);
+			this._removeChild(item, true);
 		}, this);
 		// TODO: Remove corresponding child observers to the items removed
 
@@ -158,11 +161,11 @@
 			obs.name = index;
 		}
 	}
-	ArrayObserver.prototype._removeChild = function(o) {
+	ArrayObserver.prototype._removeChild = function(o, notify) {
 		var ch = this._children;
 		var obs = ch.get(o);
 		if(obs) {
-			obs.destroy(true);
+			obs.destroy(notify);
 			ch.delete(name);
 			var co = this._childObjects;
 			var pos = co.indexOf(o);
@@ -171,9 +174,10 @@
 	}
 	ArrayObserver.prototype.destroy = function(notify) {
 		// Destroy all child properties
-		this._childObjects.forEach(this._removeChild);
+		this._childObjects.forEach(function(o) {
+			this._removeChild(o, notify);
+		}, this);
 
-		// Send notifications about all properties going away
 		Array.unobserve(this.o, this._handler);
 	}
 
@@ -198,6 +202,19 @@
 		} else if(r.type == 'delete') {
 			r.type = 'update';
 			r.newValue = undefined;
+		} else if(r.type == 'update') {
+			if(r.object != null) { // Only edit real ones, not fake destroy outputs
+				r.newValue = r.object[r.name];
+			}
+			if(Array.isArray(r.object)) {
+				r = {
+					type: 'splice',
+					removed: [r.oldValue],
+					addedCount: 1,
+					index: parseInt(r.name),
+					object: r.object
+				};
+			}
 		}
 		if(r.type != 'splice') {
 			delete r.object;
@@ -213,10 +230,16 @@
 		// Get the oldest value for each property
 		var names = {};
 		return changes.filter(function(change) {
-			if(change.oldValue === change.newValue) return false;
 			var n = change.name;
-			if(n in names) return false;
-			names[n] = 1;
+			var c = names[n];
+			if(c) {
+				c.newValue = change.newValue;
+				return false;
+			}
+			names[n] = change;
+			return true;
+		}).filter(function(change) {
+			if(change.oldValue === change.newValue) return false;
 			return true;
 		});
 	}

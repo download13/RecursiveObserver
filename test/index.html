@@ -1,0 +1,14 @@
+<!doctype html>
+<link rel=stylesheet href="http://cdnjs.cloudflare.com/ajax/libs/mocha/1.13.0/mocha.css">
+<script src="mocha.js"></script>
+<script>
+mocha.setup('bdd');
+</script>
+<script src="assert.js"></script>
+<script src="../observe.js"></script>
+<script src="observe.js"></script>
+<div id="mocha"></div>
+<script>
+mocha.checkLeaks();
+mocha.run();
+</script>

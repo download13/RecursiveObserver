@@ -1,0 +1,14 @@
+{
+  "name": "RecursiveObserver",
+  "version": "0.0.0",
+  "authors": [
+    "Erin <download333@gmail.com>"
+  ],
+  "description": "Object.observe, except recursive",
+  "main": "observe.js",
+  "keywords": [
+    "object",
+    "observe"
+  ],
+  "ignore": ["test/", ".git", "node_modules/"]
+}
